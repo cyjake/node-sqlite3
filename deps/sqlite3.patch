@@ -1,0 +1,193 @@
+diff -Naur -Z sqlite-autoconf-3240000/sqlite3.c sqlite-autoconf-3240001/sqlite3.c
+--- sqlite-autoconf-3240000/sqlite3.c	2018-06-05 03:51:29.000000000 +0800
++++ sqlite-autoconf-3240001/sqlite3.c	2018-11-01 14:43:21.832396536 +0800
+@@ -5179,6 +5179,8 @@
+ SQLITE_API const void *sqlite3_column_database_name16(sqlite3_stmt*,int);
+ SQLITE_API const char *sqlite3_column_table_name(sqlite3_stmt*,int);
+ SQLITE_API const void *sqlite3_column_table_name16(sqlite3_stmt*,int);
++SQLITE_API const char *sqlite3_column_table_alias_name(sqlite3_stmt*,int);
++SQLITE_API const void *sqlite3_column_table_alias_name16(sqlite3_stmt*,int);
+ SQLITE_API const char *sqlite3_column_origin_name(sqlite3_stmt*,int);
+ SQLITE_API const void *sqlite3_column_origin_name16(sqlite3_stmt*,int);
+ 
+@@ -14443,7 +14445,7 @@
+ #define P5_ConstraintFK      4
+ 
+ /*
+-** The Vdbe.aColName array contains 5n Mem structures, where n is the 
++** The Vdbe.aColName array contains 6n Mem structures, where n is the
+ ** number of columns of data returned by the statement.
+ */
+ #define COLNAME_NAME     0
+@@ -14451,8 +14453,9 @@
+ #define COLNAME_DATABASE 2
+ #define COLNAME_TABLE    3
+ #define COLNAME_COLUMN   4
++#define COLNAME_TABALIAS 5
+ #ifdef SQLITE_ENABLE_COLUMN_METADATA
+-# define COLNAME_N        5      /* Number of COLNAME_xxx symbols */
++# define COLNAME_N        6      /* Number of COLNAME_xxx symbols */
+ #else
+ # ifdef SQLITE_OMIT_DECLTYPE
+ #   define COLNAME_N      1      /* Store only the name */
+@@ -80777,7 +80780,7 @@
+ ** Convert the N-th element of pStmt->pColName[] into a string using
+ ** xFunc() then return that string.  If N is out of range, return 0.
+ **
+-** There are up to 5 names for each column.  useType determines which
++** There are up to 6 names for each column.  useType determines which
+ ** name is returned.  Here are the names:
+ **
+ **    0      The column name as it should be displayed for output
+@@ -80785,9 +80788,10 @@
+ **    2      The name of the database that the column derives from
+ **    3      The name of the table that the column derives from
+ **    4      The name of the table column that the result column derives from
++**    5      The name of the table for the column as it's refered in the sentence (maybe an alias)
+ **
+ ** If the result is not a simple column reference (if it is an expression
+-** or a constant) then useTypes 2, 3, and 4 return NULL.
++** or a constant) then useTypes 2, 3, 4, and 5 return NULL.
+ */
+ static const void *columnName(
+   sqlite3_stmt *pStmt,
+@@ -80902,6 +80906,22 @@
+ #endif /* SQLITE_OMIT_UTF16 */
+ 
+ /*
++** Return the name of the table for the column (maybe an alias).
++** NULL is returned if the result column is an expression or constant or
++** anything else which is not an unambiguous reference to a database column.
++*/
++SQLITE_API const char *sqlite3_column_table_alias_name(sqlite3_stmt *pStmt, int N){
++  return columnName(
++      pStmt, N, (const void*(*)(Mem*))sqlite3_value_text, COLNAME_TABALIAS);
++}
++#ifndef SQLITE_OMIT_UTF16
++SQLITE_API const void *sqlite3_column_table_alias_name16(sqlite3_stmt *pStmt, int N){
++  return columnName(
++      pStmt, N, (const void*(*)(Mem*))sqlite3_value_text16, COLNAME_TABALIAS);
++}
++#endif /* SQLITE_OMIT_UTF16 */
++
++/*
+ ** Return the name of the table column from which a result column derives.
+ ** NULL is returned if the result column is an expression or constant or
+ ** anything else which is not an unambiguous reference to a database column.
+@@ -122921,13 +122941,13 @@
+ ** 
+ ** The declaration type for any expression other than a column is NULL.
+ **
+-** This routine has either 3 or 6 parameters depending on whether or not
++** This routine has either 2 or 6 parameters depending on whether or not
+ ** the SQLITE_ENABLE_COLUMN_METADATA compile-time option is used.
+ */
+ #ifdef SQLITE_ENABLE_COLUMN_METADATA
+-# define columnType(A,B,C,D,E) columnTypeImpl(A,B,C,D,E)
++# define columnType(A,B,C,D,E,F) columnTypeImpl(A,B,C,D,E,F)
+ #else /* if !defined(SQLITE_ENABLE_COLUMN_METADATA) */
+-# define columnType(A,B,C,D,E) columnTypeImpl(A,B)
++# define columnType(A,B,C,D,E,F) columnTypeImpl(A,B)
+ #endif
+ static const char *columnTypeImpl(
+   NameContext *pNC, 
+@@ -122937,7 +122957,8 @@
+   Expr *pExpr,
+   const char **pzOrigDb,
+   const char **pzOrigTab,
+-  const char **pzOrigCol
++  const char **pzOrigCol,
++  const char **pzTableAlias
+ #endif
+ ){
+   char const *zType = 0;
+@@ -122946,6 +122967,7 @@
+   char const *zOrigDb = 0;
+   char const *zOrigTab = 0;
+   char const *zOrigCol = 0;
++  char const *zTableAlias = 0;
+ #endif
+ 
+   assert( pExpr!=0 );
+@@ -122967,6 +122989,9 @@
+         if( j<pTabList->nSrc ){
+           pTab = pTabList->a[j].pTab;
+           pS = pTabList->a[j].pSelect;
++#ifdef SQLITE_ENABLE_COLUMN_METADATA
++          zTableAlias = pTabList->a[j].zAlias ? pTabList->a[j].zAlias : pTabList->a[j].zName;
++#endif
+         }else{
+           pNC = pNC->pNext;
+         }
+@@ -123009,7 +123034,7 @@
+           sNC.pSrcList = pS->pSrc;
+           sNC.pNext = pNC;
+           sNC.pParse = pNC->pParse;
+-          zType = columnType(&sNC, p,&zOrigDb,&zOrigTab,&zOrigCol); 
++          zType = columnType(&sNC, p,&zOrigDb,&zOrigTab,&zOrigCol,&zTableAlias);
+         }
+       }else{
+         /* A real table or a CTE table */
+@@ -123053,7 +123078,7 @@
+       sNC.pSrcList = pS->pSrc;
+       sNC.pNext = pNC;
+       sNC.pParse = pNC->pParse;
+-      zType = columnType(&sNC, p, &zOrigDb, &zOrigTab, &zOrigCol); 
++      zType = columnType(&sNC, p, &zOrigDb, &zOrigTab, &zOrigCol,&zTableAlias);
+       break;
+     }
+ #endif
+@@ -123065,6 +123090,11 @@
+     *pzOrigDb = zOrigDb;
+     *pzOrigTab = zOrigTab;
+     *pzOrigCol = zOrigCol;
++    /* If pzTableAlias is already set from a higher level, do not set again,
++    ** because it could be the same original table with another alias, and
++    ** only the higher level is the correct result.
++    */
++    if( *pzTableAlias==0 ) *pzTableAlias = zTableAlias;
+   }
+ #endif
+   return zType;
+@@ -123093,7 +123123,8 @@
+     const char *zOrigDb = 0;
+     const char *zOrigTab = 0;
+     const char *zOrigCol = 0;
+-    zType = columnType(&sNC, p, &zOrigDb, &zOrigTab, &zOrigCol);
++    const char *zTableAlias = 0;
++    zType = columnType(&sNC, p, &zOrigDb, &zOrigTab, &zOrigCol, &zTableAlias);
+ 
+     /* The vdbe must make its own copy of the column-type and other 
+     ** column specific strings, in case the schema is reset before this
+@@ -123102,8 +123133,9 @@
+     sqlite3VdbeSetColName(v, i, COLNAME_DATABASE, zOrigDb, SQLITE_TRANSIENT);
+     sqlite3VdbeSetColName(v, i, COLNAME_TABLE, zOrigTab, SQLITE_TRANSIENT);
+     sqlite3VdbeSetColName(v, i, COLNAME_COLUMN, zOrigCol, SQLITE_TRANSIENT);
++    sqlite3VdbeSetColName(v, i, COLNAME_TABALIAS, zTableAlias, SQLITE_TRANSIENT);
+ #else
+-    zType = columnType(&sNC, p, 0, 0, 0);
++    zType = columnType(&sNC, p, 0, 0, 0, 0);
+ #endif
+     sqlite3VdbeSetColName(v, i, COLNAME_DECLTYPE, zType, SQLITE_TRANSIENT);
+   }
+@@ -123362,7 +123394,7 @@
+     const char *zType;
+     int n, m;
+     p = a[i].pExpr;
+-    zType = columnType(&sNC, p, 0, 0, 0);
++    zType = columnType(&sNC, p, 0, 0, 0, 0);
+     /* pCol->szEst = ... // Column size est for SELECT tables never used */
+     pCol->affinity = sqlite3ExprAffinity(p);
+     if( zType ){
+diff -Naur -Z sqlite-autoconf-3240000/sqlite3.h sqlite-autoconf-3240001/sqlite3.h
+--- sqlite-autoconf-3240000/sqlite3.h	2018-11-01 14:44:01.176218438 +0800
++++ sqlite-autoconf-3240001/sqlite3.h	2018-11-01 14:44:08.865910623 +0800
+@@ -4152,6 +4152,8 @@
+ SQLITE_API const void *sqlite3_column_database_name16(sqlite3_stmt*,int);
+ SQLITE_API const char *sqlite3_column_table_name(sqlite3_stmt*,int);
+ SQLITE_API const void *sqlite3_column_table_name16(sqlite3_stmt*,int);
++SQLITE_API const char *sqlite3_column_table_alias_name(sqlite3_stmt*,int);
++SQLITE_API const void *sqlite3_column_table_alias_name16(sqlite3_stmt*,int);
+ SQLITE_API const char *sqlite3_column_origin_name(sqlite3_stmt*,int);
+ SQLITE_API const void *sqlite3_column_origin_name16(sqlite3_stmt*,int);
+ 
